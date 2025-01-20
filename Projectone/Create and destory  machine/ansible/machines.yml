@@ -1,0 +1,17 @@
+
+
+machines:
+  - name: "Machine01"
+    size: "s-2vcpu-4gb"
+    region: "nyc1"
+    image: "ubuntu-22-04-x64"
+    
+  - name: "Machine02"
+    size: "s-2vcpu-4gb"
+    region: "nyc1"
+    image: "ubuntu-22-04-x64"
+    
+  - name: "Machine03"
+    size: "s-2vcpu-4gb"
+    region: "nyc1"
+    image: "ubuntu-22-04-x64"

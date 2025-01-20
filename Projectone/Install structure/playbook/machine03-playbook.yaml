@@ -1,0 +1,199 @@
+---
+- name: Setup Oh My Zsh, Docker repo, and Helm repo on machine03
+  hosts: machine03
+  become: true
+  tasks:
+    # Install dependencies
+    - name: Install required dependencies
+      apt:
+        name:
+          - zsh
+          - curl
+          - git
+          - apt-transport-https
+          - ca-certificates
+          - software-properties-common
+        state: present
+        update_cache: yes
+    # Install ohMyZsh
+    - name: Change default shell to Zsh
+      shell: chsh -s $(which zsh) "{{ ansible_user }}"
+      args:
+        executable: /bin/bash
+
+
+    - name: Install Oh My Zsh
+      shell: |
+        RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+      environment:
+        ZSH: "/home/{{ ansible_user }}/.oh-my-zsh"
+      args:
+        creates: "/home/{{ ansible_user }}/.oh-my-zsh"
+      register: result
+      changed_when: result.rc == 0
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: true
+  # 3. Install Docker
+    - name: Install Docker and dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: Add Docker GPG key
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+    - name: Add Docker repository
+      shell: add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+
+        state: present
+
+    - name: Add current user to Docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Create Docker Compose directory for Nexus
+
+      file:
+        path: /opt/nexus
+        state: directory
+        owner: tra
+        group: tra
+        mode: '0755'
+
+    - name: Create Docker Compose file for Nexus
+
+      copy:
+        dest: /opt/nexus/docker-compose.yml
+        content: |
+          version: '3'
+          services:
+            nexus:
+              image: sonatype/nexus3:latest
+              container_name: nexus
+              ports:
+                - "8081:8081"
+                - "5000:5000"
+              volumes:
+                - nexus-data:/nexus-data
+              environment:
+                - INSTALL4J_ADD_VM_PARAMS=-Xms1200m -Xmx1200m -XX:MaxDirectMemorySize=2g
+
+              restart: always
+          volumes:
+            nexus-data:
+              driver: local
+
+    - name: Start Nexus service with Docker Compose
+      command: docker-compose -f /opt/nexus/docker-compose.yml up -d
+      args:
+        chdir: /opt/nexus
+
+    # - name: Wait for Nexus to be ready
+    #   uri:
+    #     url: http://localhost:8081
+    #     method: GET
+    #     status_code: 200
+    #   register: nexus_status
+    #   retries: 10
+    #   delay: 10
+    #   until: nexus_status.status == 200
+
+    - name: Configure Nginx for Nexus UI and Nexus registry
+      blockinfile:
+        path: /etc/nginx/sites-available/nexus_ui_and_registry
+        create: true
+        block: |
+          server {
+              listen 80;
+              server_name nexus-ui.sopheaktra.store
+
+              location / {
+                  proxy_pass http://143.198.188.208:8081;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+          server {
+              listen 80;
+              server_name nexus-registry.sopheaktra.store;
+
+              location / {
+                  proxy_pass http://143.198.188.208:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Enable Nginx sites configuration
+      file:
+        src: /etc/nginx/sites-available/nexus_ui_and_registry
+        dest: /etc/nginx/sites-enabled/nexus_ui_and_registry
+        state: link
+
+    - name: Remove default Nginx configuration
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+    - name: Install Certbot
+      apt:
+        name: certbot
+        state: present
+
+    - name: Install Nginx plugin for Certbot
+      apt:
+        name: python3-certbot-nginx
+        state: present
+
+    - name: Obtain SSL certificates for Nexus domains
+      command: >
+        certbot --nginx -d nexus-ui.sopheaktra.store -d nexus-registry.sopheaktra.store
+        --non-interactive --agree-tos -m voysopheaktra1109@gmail.com
+      register: certbot_output
+
+
+    - name: Restart Nginx to apply SSL
+      service:
+        name: nginx
+        state: restarted
+
+    # #install portainer
+    # - name: Deploy Portainer container
+    #   docker_container:
+    #     name: portainer
+    #     image: portainer/portainer-ce:latest
+    #     state: started
+    #     ports:
+    #       - "9000:9000"
+    #     volumes:
+    #       - /var/run/docker.sock:/var/run/docker.sock
+    #       - portainer_data:/data
+  handlers:
+    - name: Restart Zsh
+      shell: exec zsh
+      become: true

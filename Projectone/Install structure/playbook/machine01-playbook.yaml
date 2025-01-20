@@ -1,0 +1,196 @@
+---
+- name: install required software on machine01
+  hosts: machine01
+  become: true
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - git
+          - python3-pip
+          - python3-venv
+        state: present
+        update_cache: yes
+
+    # 3. Install Docker
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+    - name: Add Docker repository
+      shell: |
+        add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+    - name: Install Docker and Docker Compose
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Install Docker Compose
+      shell: |
+        curl -L "https://github.com/docker/compose/releases/download/v2.5.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+    - name: Add current user to Docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # 4. Install Portainer
+    - name: Deploy Portainer container
+      docker_container:
+        name: portainer
+        image: portainer/portainer-ce:latest
+        state: started
+        ports:
+          - "9000:9000"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - portainer_data:/data
+    - name: Install glab using snap
+      shell: |
+        snap install glab
+        snap connect glab:ssh-keys
+
+    # 6. Install OhMyZsh
+    - name: Install Zsh
+      apt:
+        name: zsh
+        state: present
+    - name: Change default shell to Zsh
+      shell: chsh -s $(which zsh) "{{ ansible_user }}"
+      args:
+        executable: /bin/bash
+    - name: Install Oh My Zsh
+      shell: |
+        RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+      environment:
+        ZSH: "/home/{{ ansible_user }}/.oh-my-zsh"
+      args:
+        creates: "/home/{{ ansible_user }}/.oh-my-zsh"
+      register: result
+      changed_when: result.rc == 0
+
+    # 7. Install Ansible
+    - name: Install Ansible
+      pip:
+        name: ansible
+        executable: pip3
+
+    # 8. Install nginx
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    # 10. Ensure Jenkins container can run necessary tools
+    
+    - name: Deploy Jenkins container with required tools
+      docker_container:
+        name: jenkins
+        image: jenkins/jenkins:lts
+        state: started
+        ports:
+          - "8080:8080"
+        volumes:
+          - /var/jenkins_home:/var/jenkins_home
+        env:
+          JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+        capabilities:
+          - SYS_ADMIN
+      register: jenkins
+    # - name: Install tools inside Jenkins container
+    #   command: >
+    #     docker exec --user root -it jenkins bash -c "
+    #     apt update &&
+    #     apt install -y docker.io docker-compose ansible snapd &&
+    #     # systemctl enable snapd &&
+    #     # systemctl start snapd &&
+    #     snap install glab &&
+    #     usermod -aG docker jenkins"
+    - name: Configure Nginx for Jenkins and Portainer
+      blockinfile:
+        path: /etc/nginx/sites-available/jenkins_and_portainer
+        create: true
+        block: |
+          server {
+              listen 80;
+              server_name jenkins.sopheaktra.store;
+
+              location / {
+                  proxy_pass http://161.35.56.13:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+          server {
+              listen 80;
+              server_name portainer.sopheaktra.store;
+
+              location / {
+                  proxy_pass http://161.35.56.13:9000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+    - name: Enable Nginx site configuration
+      file:
+        src: /etc/nginx/sites-available/jenkins_and_portainer
+        dest: /etc/nginx/sites-enabled/jenkins_and_portainer
+        state: link
+
+    - name: Remove default Nginx configuration
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    # 6. Obtain and apply SSL certificates
+    - name: Install Certbot
+      apt:
+        name: certbot
+        state: present
+
+    - name: Install Nginx plugin for Certbot
+      apt:
+        name: python3-certbot-nginx
+        state: present
+
+    - name: Obtain SSL certificate for Jenkins and Portainer
+      command: >
+        certbot --nginx -d jenkins.sopheaktra.store -d portainer.sopheaktra.store
+        --non-interactive --agree-tos -m voysopheaktra1109@gmail.com
+      register: certbot_output
+
+    - name: Restart Nginx to apply SSL
+      service:
+        name: nginx
+        state: restarted
+  handlers:
+    - name: Restart Zsh
+      shell: exec zsh
+      become: true
+
